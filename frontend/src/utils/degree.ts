@@ -1,5 +1,5 @@
 import type { FireLevel, MethodName, ProcessingMethod } from '../types/processing-method';
-import type { DegreeRule, ProcessDegree } from '../types/process-batch';
+import type { DegreeRule, MethodStandardSnapshot, ProcessBatch, ProcessDegree } from '../types/process-batch';
 import type { RetainSample, SampleExpiry, SampleExpiryState } from '../types/retain-sample';
 
 /** 火力对应的常见温度区间提示（℃） */
@@ -27,6 +27,52 @@ export function expectedYieldOf(method: ProcessingMethod): number {
   return EXPECTED_YIELD[method.name];
 }
 
+/** 程度判定所依赖的方法标准（温度区间 / 时长 / 方法名），现行方法与存档快照均可满足 */
+export interface DegreeStandard {
+  name: MethodName;
+  tempRange: [number, number];
+  duration: number;
+}
+
+/** 从现行方法生成提交时要存档的标准快照 */
+export function snapshotOfMethod(method: ProcessingMethod): MethodStandardSnapshot {
+  return {
+    name: method.name,
+    auxRatio: method.auxRatio,
+    tempRange: [...method.tempRange],
+    duration: method.duration,
+    criterion: method.criterion,
+    criterionDimension: method.criterionDimension,
+  };
+}
+
+/**
+ * 批次判定所用的标准：有存档快照用存档（追溯提交时依据），
+ * 升级前的老记录没有存档则照现行方法标准；方法已删除时仅剩存档可用。
+ */
+export function standardOfBatch(batch: ProcessBatch, method?: ProcessingMethod): DegreeStandard | undefined {
+  const snapshot = batch.standardSnapshot;
+  if (snapshot) {
+    return { name: snapshot.name, tempRange: snapshot.tempRange, duration: snapshot.duration };
+  }
+  if (method) {
+    return { name: method.name, tempRange: method.tempRange, duration: method.duration };
+  }
+  return undefined;
+}
+
+/** 存档标准与现行方法是否已不一致（方法库调整后用于台账标注「标准已更新」） */
+export function standardDiffers(snapshot: MethodStandardSnapshot, method: ProcessingMethod): boolean {
+  return (
+    snapshot.auxRatio !== method.auxRatio ||
+    snapshot.duration !== method.duration ||
+    snapshot.tempRange[0] !== method.tempRange[0] ||
+    snapshot.tempRange[1] !== method.tempRange[1] ||
+    snapshot.criterion !== method.criterion ||
+    snapshot.criterionDimension !== method.criterionDimension
+  );
+}
+
 export function fireLevelTempRange(level: FireLevel): [number, number] {
   return FIRE_LEVEL_TEMP[level];
 }
@@ -39,7 +85,8 @@ export const DEGREE_RULES: DegreeRule[] = [
 ];
 
 export interface DegreeInput {
-  method: ProcessingMethod;
+  /** 判定所依据的标准：现行方法或批次存档快照 */
+  method: DegreeStandard;
   fireLevel: FireLevel;
   /** 实际炮制时长（min） */
   duration: number;
@@ -65,7 +112,7 @@ export interface DegreeVerdict {
 export function judgeDegree(input: DegreeInput): DegreeVerdict {
   const { method, fireLevel, duration, temp, yieldRate } = input;
   const [tempMin, tempMax] = method.tempRange;
-  const expectedYield = expectedYieldOf(method);
+  const expectedYield = EXPECTED_YIELD[method.name];
   const reasons: string[] = [];
   let under = 0;
   let over = 0;
@@ -115,12 +162,12 @@ export function judgeDegree(input: DegreeInput): DegreeVerdict {
   return { degree, reasons, expectedYield, deviations: under + over };
 }
 
-/** 依据方法的标准值给出建议录入值（锅温取区间中值） */
-export function suggestedValues(method: ProcessingMethod): { temp: number; duration: number; yieldRate: number } {
+/** 依据标准值给出建议录入值（锅温取区间中值）；现行方法与存档快照均可用 */
+export function suggestedValues(standard: DegreeStandard): { temp: number; duration: number; yieldRate: number } {
   return {
-    temp: Math.round((method.tempRange[0] + method.tempRange[1]) / 2),
-    duration: method.duration,
-    yieldRate: expectedYieldOf(method),
+    temp: Math.round((standard.tempRange[0] + standard.tempRange[1]) / 2),
+    duration: standard.duration,
+    yieldRate: EXPECTED_YIELD[standard.name],
   };
 }
 

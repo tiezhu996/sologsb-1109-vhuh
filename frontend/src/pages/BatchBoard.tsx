@@ -14,7 +14,7 @@ import { useBatchStore } from '../stores/batchStore';
 import { HERB_ORIGINS, HERB_PARTS } from '../types/herb-material';
 import { FIRE_LEVELS, type FireLevel } from '../types/processing-method';
 import { PROCESS_DEGREES, type ProcessBatch, type ProcessDegree } from '../types/process-batch';
-import { DEGREE_RULES, judgeDegree, suggestedValues } from '../utils/degree';
+import { DEGREE_RULES, judgeDegree, snapshotOfMethod, standardDiffers, standardOfBatch, suggestedValues } from '../utils/degree';
 
 const { Title, Paragraph, Text } = Typography;
 
@@ -68,16 +68,27 @@ export default function BatchBoard() {
     return Number(((out / feed) * 100).toFixed(1));
   }, [watched?.feedKg, watched?.outputKg]);
 
+  const herbName = (id: string) => herbs.find((h) => h.id === id)?.name ?? '未知药材';
+  const methodOf = (id: string) => methods.find((m) => m.id === id);
+
+  const editingMethod = editing ? methodOf(editing.methodId) : undefined;
+  /** 已锁定批次打开时按提交时存档的标准解释判定；老记录无存档则照现行标准 */
+  const editingStandard = editing?.locked ? standardOfBatch(editing, editingMethod) : undefined;
+  /** 判定所依据的标准：锁定记录用存档，新建/未锁定编辑用当前所选方法 */
+  const verdictStandard = editing?.locked ? editingStandard : watchedMethod;
+  /** 存档与现行方法已不一致（标准已更新） */
+  const editingStandardDiffers = Boolean(editing?.standardSnapshot && editingMethod && standardDiffers(editing.standardSnapshot, editingMethod));
+
   const verdict = useMemo(() => {
-    if (!watchedMethod) return undefined;
+    if (!verdictStandard) return undefined;
     return judgeDegree({
-      method: watchedMethod,
-      fireLevel: (watched?.fireLevel ?? watchedMethod.fireLevel) as FireLevel,
-      duration: Number(watched?.duration) || watchedMethod.duration,
-      temp: Number(watched?.temp) || Math.round((watchedMethod.tempRange[0] + watchedMethod.tempRange[1]) / 2),
+      method: verdictStandard,
+      fireLevel: (watched?.fireLevel ?? watchedMethod?.fireLevel ?? '文火') as FireLevel,
+      duration: Number(watched?.duration) || verdictStandard.duration,
+      temp: Number(watched?.temp) || Math.round((verdictStandard.tempRange[0] + verdictStandard.tempRange[1]) / 2),
       yieldRate: watchedYieldRate,
     });
-  }, [watchedMethod, watched?.fireLevel, watched?.duration, watched?.temp, watchedYieldRate]);
+  }, [verdictStandard, watched?.fireLevel, watched?.duration, watched?.temp, watchedMethod?.fireLevel, watchedYieldRate]);
 
   const visibleHerbs = useMemo(() => herbFilter.apply(herbs), [herbs, herbFilter]);
   const visibleBatches = useMemo(() => {
@@ -88,9 +99,6 @@ export default function BatchBoard() {
       return true;
     });
   }, [batches, visibleHerbs, degreeParam]);
-
-  const herbName = (id: string) => herbs.find((h) => h.id === id)?.name ?? '未知药材';
-  const methodOf = (id: string) => methods.find((m) => m.id === id);
 
   const openCreate = () => {
     setEditing(null);
@@ -122,7 +130,8 @@ export default function BatchBoard() {
     setEditing(record);
     setQcMode(false);
     form.resetFields();
-    const suggested = methodOf(record.methodId);
+    // 已提交过的记录按存档标准回填火候基准；老记录无存档则照现行方法
+    const standard = standardOfBatch(record, methodOf(record.methodId));
     form.setFieldsValue({
       batchNo: record.batchNo,
       herbId: record.herbId,
@@ -131,8 +140,8 @@ export default function BatchBoard() {
       auxUsedKg: record.auxUsedKg,
       outputKg: Number(((record.feedKg * record.yieldRate) / 100).toFixed(1)),
       fireLevel: record.fireLevel,
-      temp: suggested ? Math.round((suggested.tempRange[0] + suggested.tempRange[1]) / 2) : 100,
-      duration: suggested?.duration ?? 12,
+      temp: standard ? Math.round((standard.tempRange[0] + standard.tempRange[1]) / 2) : 100,
+      duration: standard?.duration ?? 12,
       startedAt: dayjs(record.startedAt),
       endedAt: dayjs(record.endedAt),
       operator: record.operator,
@@ -151,6 +160,9 @@ export default function BatchBoard() {
       return;
     }
     const yieldRate = Number(((outputKg / feedKg) * 100).toFixed(1));
+    // 提交（新建 / 未锁定编辑）时把当前方法标准存档；质检改判不动原存档
+    const submitMethod = methods.find((m) => m.id === values.methodId);
+    const standardSnapshot = !editing?.locked && submitMethod ? snapshotOfMethod(submitMethod) : undefined;
     const payload = {
       batchNo: values.batchNo,
       herbId: values.herbId,
@@ -163,6 +175,7 @@ export default function BatchBoard() {
       yieldRate,
       degree: values.degree,
       operator: values.operator,
+      ...(standardSnapshot ? { standardSnapshot } : {}),
       remark: values.remark,
     };
     if (editing) {
@@ -190,7 +203,35 @@ export default function BatchBoard() {
       title: '火候',
       dataIndex: 'fireLevel',
       width: 180,
-      render: (v: FireLevel, record) => <FireLevelTag level={v} tempRange={methodOf(record.methodId)?.tempRange} duration={methodOf(record.methodId)?.duration} />,
+      render: (v: FireLevel, record) => {
+        const standard = standardOfBatch(record, methodOf(record.methodId));
+        return <FireLevelTag level={v} tempRange={standard?.tempRange} duration={standard?.duration} />;
+      },
+    },
+    {
+      title: '判定标准',
+      key: 'standard',
+      width: 250,
+      render: (_, record) => {
+        const snapshot = record.standardSnapshot;
+        const method = methodOf(record.methodId);
+        if (!snapshot) {
+          return <Text type="secondary" style={{ fontSize: 12 }}>按现行标准（老记录未存档）</Text>;
+        }
+        if (!method) {
+          return <Text type="secondary" style={{ fontSize: 12 }}>按存档标准（方法已删除）</Text>;
+        }
+        if (!standardDiffers(snapshot, method)) {
+          return <Text type="secondary" style={{ fontSize: 12 }}>按存档标准（与现行一致）</Text>;
+        }
+        return (
+          <div style={{ fontSize: 12, lineHeight: 1.7 }}>
+            <Tag color="gold" style={{ marginRight: 0 }}>标准已更新</Tag>
+            <div>存档 {snapshot.tempRange[0]}~{snapshot.tempRange[1]}℃ · {snapshot.duration}min · 辅料{snapshot.auxRatio}kg/100kg</div>
+            <div style={{ color: '#6b7a70' }}>现行 {method.tempRange[0]}~{method.tempRange[1]}℃ · {method.duration}min · 辅料{method.auxRatio}kg/100kg</div>
+          </div>
+        );
+      },
     },
     { title: '投料(kg)', dataIndex: 'feedKg', width: 90, align: 'right' },
     { title: '辅料(kg)', dataIndex: 'auxUsedKg', width: 90, align: 'right' },
@@ -278,7 +319,7 @@ export default function BatchBoard() {
       {visibleBatches.length === 0 ? (
         <EmptyPanel description="没有符合条件的工序记录" actionText="新建一条工序记录" onAction={openCreate} />
       ) : (
-        <Table rowKey="id" size="small" columns={columns} dataSource={visibleBatches} pagination={{ pageSize: 10 }} scroll={{ x: 1400 }} />
+        <Table rowKey="id" size="small" columns={columns} dataSource={visibleBatches} pagination={{ pageSize: 10 }} scroll={{ x: 1650 }} />
       )}
 
       <Modal
@@ -353,7 +394,22 @@ export default function BatchBoard() {
             </Form.Item>
           </Space>
 
-          {watchedMethod ? (
+          {editing?.locked && editing.standardSnapshot ? (
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginBottom: 12 }}
+              message={
+                <Space wrap size={8}>
+                  <span>辅料比例 {editing.standardSnapshot.auxRatio}kg/100kg</span>
+                  <FireLevelTag level={editing.fireLevel} tempRange={editing.standardSnapshot.tempRange} duration={editing.standardSnapshot.duration} />
+                  <Tag>{editing.standardSnapshot.criterionDimension}</Tag>
+                  <Text type="secondary" style={{ fontSize: 12 }}>提交时存档的标准</Text>
+                </Space>
+              }
+              description={`判断标准（存档）：${editing.standardSnapshot.criterion}`}
+            />
+          ) : watchedMethod ? (
             <Alert
               type="success"
               showIcon
@@ -369,8 +425,29 @@ export default function BatchBoard() {
             />
           ) : null}
 
+          {editing?.locked && editing.standardSnapshot && editingStandardDiffers && editingMethod ? (
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginBottom: 12 }}
+              message="标准已更新：本批程度判定仍按存档值计算"
+              description={
+                <div style={{ fontSize: 12, lineHeight: 1.8 }}>
+                  <div>
+                    存档 {editing.standardSnapshot.tempRange[0]}~{editing.standardSnapshot.tempRange[1]}℃ · {editing.standardSnapshot.duration}min ·
+                    辅料{editing.standardSnapshot.auxRatio}kg/100kg · {editing.standardSnapshot.criterion}
+                  </div>
+                  <div style={{ color: '#6b7a70' }}>
+                    现行 {editingMethod.tempRange[0]}~{editingMethod.tempRange[1]}℃ · {editingMethod.duration}min ·
+                    辅料{editingMethod.auxRatio}kg/100kg · {editingMethod.criterion}
+                  </div>
+                </div>
+              }
+            />
+          ) : null}
+
           <RatioCalculator
-            auxRatio={watchedMethod?.auxRatio ?? 0}
+            auxRatio={editing?.locked && editing.standardSnapshot ? editing.standardSnapshot.auxRatio : watchedMethod?.auxRatio ?? 0}
             auxiliary={watchedMethod?.auxiliary ?? '无'}
             feedKg={Number(watched?.feedKg) || 0}
             auxUsedKg={Number(watched?.auxUsedKg) || 0}
@@ -408,7 +485,7 @@ export default function BatchBoard() {
             type={verdict?.degree === '适中' ? 'success' : verdict?.degree === '太过' ? 'error' : 'warning'}
             showIcon
             style={{ marginBottom: 12 }}
-            message={`系统判定：${verdict?.degree ?? '待录入火候与得率'}（得率 ${watchedYieldRate}%，预期 ${verdict?.expectedYield ?? '-'}%）`}
+            message={`系统判定：${verdict?.degree ?? '待录入火候与得率'}（得率 ${watchedYieldRate}%，预期 ${verdict?.expectedYield ?? '-'}%）${editing?.locked && editing.standardSnapshot ? '，按存档标准' : ''}`}
             description={
               <ul style={{ margin: 0, paddingLeft: 18 }}>
                 {(verdict?.reasons ?? ['选择方法并录入锅温、时长、炮制后重量后自动判定']).map((r) => (

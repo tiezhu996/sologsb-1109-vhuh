@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { db } from '../utils/db';
 import { uid } from '../utils/id';
 import type { FireLevel } from '../types/processing-method';
-import type { ProcessBatch, ProcessDegree } from '../types/process-batch';
+import type { MethodStandardSnapshot, ProcessBatch, ProcessDegree } from '../types/process-batch';
 
 export interface BatchInput {
   batchNo: string;
@@ -16,6 +16,8 @@ export interface BatchInput {
   yieldRate: number;
   degree: ProcessDegree;
   operator: string;
+  /** 提交时存档的方法标准快照；不传（如质检改判）则保留原存档 */
+  standardSnapshot?: MethodStandardSnapshot;
   remark?: string;
 }
 
@@ -60,6 +62,7 @@ export const useBatchStore = create<BatchState>()((set, get) => ({
       operator: input.operator.trim(),
       locked: lock,
       lockedAt: lock ? new Date().toISOString() : undefined,
+      standardSnapshot: input.standardSnapshot,
       remark: input.remark?.trim() || undefined,
     };
     await db.batches.put(batch);
@@ -76,6 +79,10 @@ export const useBatchStore = create<BatchState>()((set, get) => ({
       return false;
     }
     const next: ProcessBatch = { ...current, ...patch };
+    // 未随 patch 提交新快照时保留原存档（如质检改判只改得率与程度）
+    if (patch.standardSnapshot === undefined) {
+      next.standardSnapshot = current.standardSnapshot;
+    }
     if (force) {
       next.qcBy = next.qcBy ?? '质检员 · 赵敏';
     }

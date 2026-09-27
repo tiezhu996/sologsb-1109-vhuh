@@ -1,9 +1,9 @@
 import { db } from './db';
 import { HERB_ORIGINS, type HerbMaterial } from '../types/herb-material';
 import { METHOD_NAMES, type ProcessingMethod } from '../types/processing-method';
-import type { ProcessBatch } from '../types/process-batch';
+import type { MethodStandardSnapshot, ProcessBatch } from '../types/process-batch';
 import { CABINETS, type RetainSample } from '../types/retain-sample';
-import { judgeDegree, expectedYieldOf } from './degree';
+import { judgeDegree, expectedYieldOf, snapshotOfMethod } from './degree';
 
 /** 首次打开时写入的示例台账，便于直接查看各页面效果 */
 export const SEED_HERBS: HerbMaterial[] = [
@@ -38,6 +38,12 @@ function isoMinutesAgo(minutes: number): string {
   return new Date(Date.now() - minutes * 60_000).toISOString();
 }
 
+/** 模拟药典/方法库调整前提交的旧版标准存档，用于演示台账「标准已更新」标注 */
+const ARCHIVED_OVERRIDES: Record<number, Partial<MethodStandardSnapshot>> = {
+  0: { tempRange: [120, 150], duration: 12, auxRatio: 12, criterion: '色转深黄、麸皮焦香' },
+  4: { tempRange: [110, 140], auxRatio: 20 },
+};
+
 function buildSeedBatches(): ProcessBatch[] {
   const plan: Array<[string, string, string, number, number, number, string, string, string]> = [
     // batchNo, herbId, methodId, feedKg, auxUsedKg, durationMin, fireLevel, operator, remark
@@ -58,11 +64,13 @@ function buildSeedBatches(): ProcessBatch[] {
     const endedAt = isoMinutesAgo(45 * (index + 1));
     const startedAt = new Date(new Date(endedAt).getTime() - duration * 60_000).toISOString();
     const yieldRate = Number((expectedYieldOf(method) + ((index % 5) - 2) * 0.8).toFixed(1));
+    // 提交时存档当时的方法标准；程度判定按存档版计算
+    const standardSnapshot: MethodStandardSnapshot = { ...snapshotOfMethod(method), ...ARCHIVED_OVERRIDES[index] };
     const verdict = judgeDegree({
-      method,
+      method: standardSnapshot,
       fireLevel: fireLevel as ProcessBatch['fireLevel'],
       duration,
-      temp: Math.round((method.tempRange[0] + method.tempRange[1]) / 2),
+      temp: Math.round((standardSnapshot.tempRange[0] + standardSnapshot.tempRange[1]) / 2),
       yieldRate,
     });
     const locked = index >= 2;
@@ -82,6 +90,7 @@ function buildSeedBatches(): ProcessBatch[] {
       locked,
       lockedAt: locked ? new Date(new Date(endedAt).getTime() + 30 * 60_000).toISOString() : undefined,
       qcBy: locked ? '质检员 · 赵敏' : undefined,
+      standardSnapshot,
       remark,
     };
   });
