@@ -3,7 +3,7 @@ import { HERB_ORIGINS, type HerbMaterial } from '../types/herb-material';
 import { METHOD_NAMES, type ProcessingMethod } from '../types/processing-method';
 import type { ProcessBatch } from '../types/process-batch';
 import { CABINETS, type RetainSample } from '../types/retain-sample';
-import { judgeDegree, expectedYieldOf } from './degree';
+import { judgeDegree, expectedYieldOf, snapshotOfMethod, standardOfMethod, standardOfSnapshot } from './degree';
 
 /** 首次打开时写入的示例台账，便于直接查看各页面效果 */
 export const SEED_HERBS: HerbMaterial[] = [
@@ -43,7 +43,7 @@ function buildSeedBatches(): ProcessBatch[] {
     // batchNo, herbId, methodId, feedKg, auxUsedKg, durationMin, fireLevel, operator, remark
     ['PZ-25081', 'herb-001', 'method-002', 120, 12, 10, '中火', '陈玉兰', '麸炒白术'],
     ['PZ-25082', 'herb-002', 'method-003', 80, 8, 15, '文火', '陈玉兰', '酒炙白芍'],
-    ['PZ-25083', 'herb-003', 'method-003', 60, 6, 15, '文火', '刘建国', '酒炙当归'],
+    ['PZ-25083', 'herb-003', 'method-003', 60, 7.2, 15, '文火', '刘建国', '酒炙当归'],
     ['PZ-25084', 'herb-004', 'method-001', 45, 0, 12, '文火', '刘建国', '清炒陈皮'],
     ['PZ-25085', 'herb-005', 'method-006', 200, 50, 16, '中火', '王丽', '蜜炙黄芪'],
     ['PZ-25086', 'herb-006', 'method-010', 150, 0, 45, '武火', '王丽', '煅牡蛎'],
@@ -58,14 +58,27 @@ function buildSeedBatches(): ProcessBatch[] {
     const endedAt = isoMinutesAgo(45 * (index + 1));
     const startedAt = new Date(new Date(endedAt).getTime() - duration * 60_000).toISOString();
     const yieldRate = Number((expectedYieldOf(method) + ((index % 5) - 2) * 0.8).toFixed(1));
+    const locked = index >= 2;
+    const lockedAt = locked ? new Date(new Date(endedAt).getTime() + 30 * 60_000).toISOString() : undefined;
+    // 提交（锁定）时存档当时的方法标准；未锁定的批次尚未提交，不留存档
+    const snapshot = locked ? snapshotOfMethod(method) : undefined;
+    if (snapshot && lockedAt) {
+      snapshot.archivedAt = lockedAt;
+      if (batchNo === 'PZ-25083') {
+        // 演示：该批提交后酒炙标准随药典调整，台账应标「标准已更新」，判定仍按存档值
+        snapshot.tempRange = [95, 125];
+        snapshot.duration = 18;
+        snapshot.auxRatio = 12;
+      }
+    }
+    const standard = snapshot ? standardOfSnapshot(snapshot) : standardOfMethod(method);
     const verdict = judgeDegree({
-      method,
+      standard,
       fireLevel: fireLevel as ProcessBatch['fireLevel'],
       duration,
-      temp: Math.round((method.tempRange[0] + method.tempRange[1]) / 2),
+      temp: Math.round((standard.tempRange[0] + standard.tempRange[1]) / 2),
       yieldRate,
     });
-    const locked = index >= 2;
     return {
       id: `batch-${String(index + 1).padStart(3, '0')}`,
       batchNo,
@@ -80,8 +93,9 @@ function buildSeedBatches(): ProcessBatch[] {
       degree: verdict.degree,
       operator,
       locked,
-      lockedAt: locked ? new Date(new Date(endedAt).getTime() + 30 * 60_000).toISOString() : undefined,
+      lockedAt,
       qcBy: locked ? '质检员 · 赵敏' : undefined,
+      standardSnapshot: snapshot,
       remark,
     };
   });

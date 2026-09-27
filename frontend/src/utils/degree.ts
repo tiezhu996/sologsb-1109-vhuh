@@ -1,5 +1,5 @@
 import type { FireLevel, MethodName, ProcessingMethod } from '../types/processing-method';
-import type { DegreeRule, ProcessDegree } from '../types/process-batch';
+import type { DegreeRule, ProcessDegree, StandardSnapshot } from '../types/process-batch';
 import type { RetainSample, SampleExpiry, SampleExpiryState } from '../types/retain-sample';
 
 /** 火力对应的常见温度区间提示（℃） */
@@ -27,6 +27,47 @@ export function expectedYieldOf(method: ProcessingMethod): number {
   return EXPECTED_YIELD[method.name];
 }
 
+/** 程度判定所用的方法标准值：现行方法或提交时的存档快照都可提供 */
+export interface MethodStandard {
+  tempRange: [number, number];
+  duration: number;
+  expectedYield: number;
+}
+
+/** 取方法库现行标准值 */
+export function standardOfMethod(method: ProcessingMethod): MethodStandard {
+  return { tempRange: method.tempRange, duration: method.duration, expectedYield: expectedYieldOf(method) };
+}
+
+/** 取存档快照中的标准值（追溯时按这版解释判定） */
+export function standardOfSnapshot(snapshot: StandardSnapshot): MethodStandard {
+  return { tempRange: snapshot.tempRange, duration: snapshot.duration, expectedYield: snapshot.expectedYield };
+}
+
+/** 提交工序记录时存档方法标准快照（温度区间 / 时长 / 辅料比例 / 判断标准 / 预期得率） */
+export function snapshotOfMethod(method: ProcessingMethod): StandardSnapshot {
+  return {
+    tempRange: [method.tempRange[0], method.tempRange[1]],
+    duration: method.duration,
+    auxRatio: method.auxRatio,
+    criterion: method.criterion,
+    criterionDimension: method.criterionDimension,
+    expectedYield: expectedYieldOf(method),
+    archivedAt: new Date().toISOString(),
+  };
+}
+
+/** 存档快照与现行方法标准是否已不一致（不一致即“标准已更新”，程度判定仍按存档值算） */
+export function standardChanged(snapshot: StandardSnapshot, method: ProcessingMethod): boolean {
+  return (
+    snapshot.tempRange[0] !== method.tempRange[0] ||
+    snapshot.tempRange[1] !== method.tempRange[1] ||
+    snapshot.duration !== method.duration ||
+    snapshot.auxRatio !== method.auxRatio ||
+    snapshot.criterion !== method.criterion
+  );
+}
+
 export function fireLevelTempRange(level: FireLevel): [number, number] {
   return FIRE_LEVEL_TEMP[level];
 }
@@ -39,7 +80,8 @@ export const DEGREE_RULES: DegreeRule[] = [
 ];
 
 export interface DegreeInput {
-  method: ProcessingMethod;
+  /** 判定依据的标准值：新记录用现行方法标准，已提交批次用存档快照 */
+  standard: MethodStandard;
   fireLevel: FireLevel;
   /** 实际炮制时长（min） */
   duration: number;
@@ -63,9 +105,9 @@ export interface DegreeVerdict {
  * 炮制程度判定：分别比对温度、时长与得率，按偏差方向投票得出程度。
  */
 export function judgeDegree(input: DegreeInput): DegreeVerdict {
-  const { method, fireLevel, duration, temp, yieldRate } = input;
-  const [tempMin, tempMax] = method.tempRange;
-  const expectedYield = expectedYieldOf(method);
+  const { standard, fireLevel, duration, temp, yieldRate } = input;
+  const [tempMin, tempMax] = standard.tempRange;
+  const expectedYield = standard.expectedYield;
   const reasons: string[] = [];
   let under = 0;
   let over = 0;
@@ -80,16 +122,16 @@ export function judgeDegree(input: DegreeInput): DegreeVerdict {
     reasons.push(`锅温 ${temp}℃ 落在标准区间 ${tempMin}~${tempMax}℃ 内`);
   }
 
-  const minDuration = method.duration * 0.8;
-  const maxDuration = method.duration * 1.2;
+  const minDuration = standard.duration * 0.8;
+  const maxDuration = standard.duration * 1.2;
   if (duration < minDuration) {
     under += 1;
-    reasons.push(`炮制 ${duration}min 短于标准 ${method.duration}min 的 80%，有效成分转化不完全`);
+    reasons.push(`炮制 ${duration}min 短于标准 ${standard.duration}min 的 80%，有效成分转化不完全`);
   } else if (duration > maxDuration) {
     over += 1;
-    reasons.push(`炮制 ${duration}min 超过标准 ${method.duration}min 的 120%，色泽易过深`);
+    reasons.push(`炮制 ${duration}min 超过标准 ${standard.duration}min 的 120%，色泽易过深`);
   } else {
-    reasons.push(`炮制 ${duration}min 在标准 ${method.duration}min ±20% 内`);
+    reasons.push(`炮制 ${duration}min 在标准 ${standard.duration}min ±20% 内`);
   }
 
   if (yieldRate > expectedYield + 3) {

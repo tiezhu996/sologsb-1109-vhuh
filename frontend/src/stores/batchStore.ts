@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { db } from '../utils/db';
 import { uid } from '../utils/id';
 import type { FireLevel } from '../types/processing-method';
-import type { ProcessBatch, ProcessDegree } from '../types/process-batch';
+import type { ProcessBatch, ProcessDegree, StandardSnapshot } from '../types/process-batch';
 
 export interface BatchInput {
   batchNo: string;
@@ -16,6 +16,8 @@ export interface BatchInput {
   yieldRate: number;
   degree: ProcessDegree;
   operator: string;
+  /** 提交时存档的方法标准快照（温度区间/时长/辅料比例等） */
+  standardSnapshot?: StandardSnapshot;
   remark?: string;
 }
 
@@ -26,8 +28,8 @@ interface BatchState {
   createBatch: (input: BatchInput, lock?: boolean) => Promise<ProcessBatch>;
   updateBatch: (id: string, patch: Partial<BatchInput>, force?: boolean) => Promise<boolean>;
   removeBatch: (id: string) => Promise<void>;
-  /** 提交得率与程度判定后锁定该批 */
-  lockBatch: (id: string) => Promise<void>;
+  /** 提交得率与程度判定后锁定该批；无存档快照的批次在此时补存档 */
+  lockBatch: (id: string, snapshot?: StandardSnapshot) => Promise<void>;
   /** 质检员放行/改判：仅质检员可解锁 */
   unlockAsQc: (id: string, qcBy: string) => Promise<void>;
   degreeCount: () => Record<ProcessDegree, number>;
@@ -60,6 +62,7 @@ export const useBatchStore = create<BatchState>()((set, get) => ({
       operator: input.operator.trim(),
       locked: lock,
       lockedAt: lock ? new Date().toISOString() : undefined,
+      standardSnapshot: input.standardSnapshot,
       remark: input.remark?.trim() || undefined,
     };
     await db.batches.put(batch);
@@ -89,12 +92,18 @@ export const useBatchStore = create<BatchState>()((set, get) => ({
     set({ batches: get().batches.filter((b) => b.id !== id) });
   },
 
-  lockBatch: async (id) => {
+  lockBatch: async (id, snapshot) => {
     const current = get().batches.find((b) => b.id === id);
     if (!current) {
       return;
     }
-    const next: ProcessBatch = { ...current, locked: true, lockedAt: new Date().toISOString() };
+    const next: ProcessBatch = {
+      ...current,
+      locked: true,
+      lockedAt: new Date().toISOString(),
+      // 已有存档不覆盖（追溯仍按提交时那版）；老记录首次锁定时补一份
+      standardSnapshot: current.standardSnapshot ?? snapshot,
+    };
     await db.batches.put(next);
     set({ batches: get().batches.map((b) => (b.id === id ? next : b)) });
   },

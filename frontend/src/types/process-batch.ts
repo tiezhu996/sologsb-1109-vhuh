@@ -1,7 +1,28 @@
-import type { FireLevel } from './processing-method';
+import type { CriterionDimension, FireLevel } from './processing-method';
 
 /** 炮制程度 */
 export type ProcessDegree = '不及' | '适中' | '太过';
+
+/**
+ * 提交时存档的方法标准快照。
+ * 方法标准随药典调整后，已提交批次仍按这版解释判定，追溯时可还原当时的判定依据。
+ */
+export interface StandardSnapshot {
+  /** 温度区间（℃），[下限, 上限] */
+  tempRange: [number, number];
+  /** 炮制时长（min） */
+  duration: number;
+  /** 每 100kg 药材辅料用量（kg） */
+  auxRatio: number;
+  /** 判断标准原文 */
+  criterion: string;
+  /** 判断标准侧重维度 */
+  criterionDimension: CriterionDimension;
+  /** 预期得率（%） */
+  expectedYield: number;
+  /** 存档时间 ISO */
+  archivedAt: string;
+}
 
 /** 炮制工序记录 */
 export interface ProcessBatch {
@@ -34,6 +55,8 @@ export interface ProcessBatch {
   lockedAt?: string;
   /** 质检员放行/改判人 */
   qcBy?: string;
+  /** 提交时存档的方法标准（温度区间/时长/辅料比例等）；升级前的老记录无此字段，按现行标准显示 */
+  standardSnapshot?: StandardSnapshot;
   /** 备注 */
   remark?: string;
 }

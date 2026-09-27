@@ -1,11 +1,12 @@
 import { useMemo, useState } from 'react';
-import { Alert, App as AntApp, Button, Card, DatePicker, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Switch, Table, Tag, Typography } from 'antd';
+import { Alert, App as AntApp, Button, Card, DatePicker, Form, Input, InputNumber, Modal, Popconfirm, Popover, Select, Space, Switch, Table, Tag, Typography } from 'antd';
 import type { TableColumnsType } from 'antd';
 import dayjs, { type Dayjs } from 'dayjs';
 import { useSearchParams } from 'react-router-dom';
 import FilterBar from '../components/common/FilterBar';
 import FireLevelTag from '../components/common/FireLevelTag';
 import RatioCalculator from '../components/common/RatioCalculator';
+import StandardCompare from '../components/common/StandardCompare';
 import EmptyPanel from '../components/common/EmptyPanel';
 import { useHerbFilter } from '../hooks/useHerbFilter';
 import { useHerbStore } from '../stores/herbStore';
@@ -14,7 +15,7 @@ import { useBatchStore } from '../stores/batchStore';
 import { HERB_ORIGINS, HERB_PARTS } from '../types/herb-material';
 import { FIRE_LEVELS, type FireLevel } from '../types/processing-method';
 import { PROCESS_DEGREES, type ProcessBatch, type ProcessDegree } from '../types/process-batch';
-import { DEGREE_RULES, judgeDegree, suggestedValues } from '../utils/degree';
+import { DEGREE_RULES, judgeDegree, snapshotOfMethod, standardChanged, standardOfMethod, standardOfSnapshot, suggestedValues } from '../utils/degree';
 
 const { Title, Paragraph, Text } = Typography;
 
@@ -61,6 +62,16 @@ export default function BatchBoard() {
 
   const watched = Form.useWatch([], form) as Partial<BatchFormValues> | undefined;
   const watchedMethod = methods.find((m) => m.id === (watched?.methodId ?? ''));
+
+  // 已提交批次带存档快照：方法未换时判定说明按存档这版解释；升级前老记录无存档，照现行标准显示
+  const archivedSnapshot = useMemo(() => {
+    if (!editing?.standardSnapshot) return undefined;
+    const selectedMethodId = watched?.methodId ?? editing.methodId;
+    return selectedMethodId === editing.methodId ? editing.standardSnapshot : undefined;
+  }, [editing, watched?.methodId]);
+
+  const methodDrifted = Boolean(archivedSnapshot && watchedMethod && standardChanged(archivedSnapshot, watchedMethod));
+
   const watchedYieldRate = useMemo(() => {
     const feed = Number(watched?.feedKg) || 0;
     const out = Number(watched?.outputKg) || 0;
@@ -69,15 +80,20 @@ export default function BatchBoard() {
   }, [watched?.feedKg, watched?.outputKg]);
 
   const verdict = useMemo(() => {
-    if (!watchedMethod) return undefined;
+    const standard = archivedSnapshot
+      ? standardOfSnapshot(archivedSnapshot)
+      : watchedMethod
+        ? standardOfMethod(watchedMethod)
+        : undefined;
+    if (!standard) return undefined;
     return judgeDegree({
-      method: watchedMethod,
-      fireLevel: (watched?.fireLevel ?? watchedMethod.fireLevel) as FireLevel,
-      duration: Number(watched?.duration) || watchedMethod.duration,
-      temp: Number(watched?.temp) || Math.round((watchedMethod.tempRange[0] + watchedMethod.tempRange[1]) / 2),
+      standard,
+      fireLevel: (watched?.fireLevel ?? watchedMethod?.fireLevel ?? '文火') as FireLevel,
+      duration: Number(watched?.duration) || standard.duration,
+      temp: Number(watched?.temp) || Math.round((standard.tempRange[0] + standard.tempRange[1]) / 2),
       yieldRate: watchedYieldRate,
     });
-  }, [watchedMethod, watched?.fireLevel, watched?.duration, watched?.temp, watchedYieldRate]);
+  }, [archivedSnapshot, watchedMethod, watched?.fireLevel, watched?.duration, watched?.temp, watchedYieldRate]);
 
   const visibleHerbs = useMemo(() => herbFilter.apply(herbs), [herbs, herbFilter]);
   const visibleBatches = useMemo(() => {
@@ -123,6 +139,9 @@ export default function BatchBoard() {
     setQcMode(false);
     form.resetFields();
     const suggested = methodOf(record.methodId);
+    // 有存档快照的批次按存档标准回显火候；无存档的老记录照现行标准
+    const snap = record.standardSnapshot;
+    const tempRange = snap?.tempRange ?? suggested?.tempRange;
     form.setFieldsValue({
       batchNo: record.batchNo,
       herbId: record.herbId,
@@ -131,8 +150,8 @@ export default function BatchBoard() {
       auxUsedKg: record.auxUsedKg,
       outputKg: Number(((record.feedKg * record.yieldRate) / 100).toFixed(1)),
       fireLevel: record.fireLevel,
-      temp: suggested ? Math.round((suggested.tempRange[0] + suggested.tempRange[1]) / 2) : 100,
-      duration: suggested?.duration ?? 12,
+      temp: tempRange ? Math.round((tempRange[0] + tempRange[1]) / 2) : 100,
+      duration: snap?.duration ?? suggested?.duration ?? 12,
       startedAt: dayjs(record.startedAt),
       endedAt: dayjs(record.endedAt),
       operator: record.operator,
@@ -151,6 +170,12 @@ export default function BatchBoard() {
       return;
     }
     const yieldRate = Number(((outputKg / feedKg) * 100).toFixed(1));
+    const method = methods.find((m) => m.id === values.methodId);
+    // 提交即存档当时的方法标准（温度区间/时长/辅料比例等）；改判时若更换了方法，按新方法重新存档
+    let standardSnapshot = editing?.standardSnapshot;
+    if (!editing || values.methodId !== editing.methodId) {
+      standardSnapshot = method ? snapshotOfMethod(method) : undefined;
+    }
     const payload = {
       batchNo: values.batchNo,
       herbId: values.herbId,
@@ -163,6 +188,7 @@ export default function BatchBoard() {
       yieldRate,
       degree: values.degree,
       operator: values.operator,
+      standardSnapshot,
       remark: values.remark,
     };
     if (editing) {
@@ -185,12 +211,41 @@ export default function BatchBoard() {
   const columns: TableColumnsType<ProcessBatch> = [
     { title: '生产批号', dataIndex: 'batchNo', width: 130, render: (v: string) => <Text strong>{v}</Text> },
     { title: '药材', dataIndex: 'herbId', width: 90, render: (id: string) => herbName(id) },
-    { title: '方法', dataIndex: 'methodId', width: 90, render: (id: string) => methodOf(id)?.name ?? '-' },
+    {
+      title: '方法',
+      dataIndex: 'methodId',
+      width: 160,
+      render: (id: string, record) => {
+        const method = methodOf(id);
+        const snap = record.standardSnapshot;
+        const drifted = snap && method ? standardChanged(snap, method) : false;
+        return (
+          <Space size={4} wrap>
+            <span>{method?.name ?? '-'}</span>
+            {drifted && snap && method ? (
+              <Popover
+                title="标准已更新 · 存档值与当前值并排"
+                content={<StandardCompare snapshot={snap} method={method} />}
+              >
+                <Tag color="gold" style={{ marginInlineEnd: 0, cursor: 'pointer' }}>
+                  标准已更新
+                </Tag>
+              </Popover>
+            ) : null}
+          </Space>
+        );
+      },
+    },
     {
       title: '火候',
       dataIndex: 'fireLevel',
       width: 180,
-      render: (v: FireLevel, record) => <FireLevelTag level={v} tempRange={methodOf(record.methodId)?.tempRange} duration={methodOf(record.methodId)?.duration} />,
+      render: (v: FireLevel, record) => {
+        const snap = record.standardSnapshot;
+        const method = methodOf(record.methodId);
+        // 有存档按存档标准展示（判定依据）；升级前老记录无存档，照现行标准
+        return <FireLevelTag level={v} tempRange={snap?.tempRange ?? method?.tempRange} duration={snap?.duration ?? method?.duration} />;
+      },
     },
     { title: '投料(kg)', dataIndex: 'feedKg', width: 90, align: 'right' },
     { title: '辅料(kg)', dataIndex: 'auxUsedKg', width: 90, align: 'right' },
@@ -214,7 +269,15 @@ export default function BatchBoard() {
             {record.locked ? '质检改判' : '编辑'}
           </Button>
           {!record.locked ? (
-            <Button size="small" type="link" onClick={() => lockBatch(record.id).then(() => message.success('已锁定该批'))}>
+            <Button
+              size="small"
+              type="link"
+              onClick={() => {
+                // 锁定时若还没有存档（升级前的老记录），按现行标准补一份快照
+                const method = methodOf(record.methodId);
+                lockBatch(record.id, method ? snapshotOfMethod(method) : undefined).then(() => message.success('已锁定该批'));
+              }}
+            >
               锁定
             </Button>
           ) : (
@@ -353,7 +416,36 @@ export default function BatchBoard() {
             </Form.Item>
           </Space>
 
-          {watchedMethod ? (
+          {archivedSnapshot ? (
+            <Alert
+              type={methodDrifted ? 'warning' : 'success'}
+              showIcon
+              style={{ marginBottom: 12 }}
+              message={
+                <Space wrap size={8}>
+                  <Tag color="blue">存档标准</Tag>
+                  <span>辅料比例 {archivedSnapshot.auxRatio}kg/100kg</span>
+                  <FireLevelTag
+                    level={(watched?.fireLevel ?? watchedMethod?.fireLevel ?? '文火') as FireLevel}
+                    tempRange={archivedSnapshot.tempRange}
+                    duration={archivedSnapshot.duration}
+                  />
+                  <Tag>{archivedSnapshot.criterionDimension}</Tag>
+                  {methodDrifted ? <Tag color="gold">标准已更新</Tag> : null}
+                </Space>
+              }
+              description={
+                methodDrifted && watchedMethod ? (
+                  <div>
+                    <div style={{ marginBottom: 6 }}>判断标准（存档）：{archivedSnapshot.criterion}</div>
+                    <StandardCompare snapshot={archivedSnapshot} method={watchedMethod} />
+                  </div>
+                ) : (
+                  `判断标准（存档）：${archivedSnapshot.criterion}；存档于 ${archivedSnapshot.archivedAt.slice(0, 10)}，程度判定按存档值解释`
+                )
+              }
+            />
+          ) : watchedMethod ? (
             <Alert
               type="success"
               showIcon
@@ -408,7 +500,7 @@ export default function BatchBoard() {
             type={verdict?.degree === '适中' ? 'success' : verdict?.degree === '太过' ? 'error' : 'warning'}
             showIcon
             style={{ marginBottom: 12 }}
-            message={`系统判定：${verdict?.degree ?? '待录入火候与得率'}（得率 ${watchedYieldRate}%，预期 ${verdict?.expectedYield ?? '-'}%）`}
+            message={`系统判定${archivedSnapshot ? '（按存档标准）' : ''}：${verdict?.degree ?? '待录入火候与得率'}（得率 ${watchedYieldRate}%，预期 ${verdict?.expectedYield ?? '-'}%）`}
             description={
               <ul style={{ margin: 0, paddingLeft: 18 }}>
                 {(verdict?.reasons ?? ['选择方法并录入锅温、时长、炮制后重量后自动判定']).map((r) => (
